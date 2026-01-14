@@ -1,9 +1,23 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import config from "./config";
 
 // Generate dates from config
+const formatDateKey = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const formatDateLabel = (date) =>
+  date.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+
 const generateDates = () => {
   const dates = [];
   const start = new Date(config.startDate);
@@ -16,6 +30,7 @@ const generateDates = () => {
       month: date.getMonth(),
       year: date.getFullYear(),
       date,
+      dateKey: formatDateKey(date),
       dayName: date.toLocaleDateString("en-US", { weekday: "short" }),
       isWeekend: date.getDay() === 0 || date.getDay() === 6,
     });
@@ -24,6 +39,53 @@ const generateDates = () => {
 };
 
 const dates = generateDates();
+
+const extractTags = (text) => {
+  if (!text) return [];
+  const tagRegex = /#([a-zA-Z0-9_-]+)/g;
+  const tags = new Set();
+  let match;
+  while ((match = tagRegex.exec(text)) !== null) {
+    tags.add(match[1].toLowerCase());
+  }
+  return Array.from(tags);
+};
+
+const getWeekRange = (baseDate) => {
+  const date = new Date(baseDate);
+  const day = date.getDay(); // 0 (Sun) - 6 (Sat)
+  const diffToMonday = (day + 6) % 7;
+  const start = new Date(date);
+  start.setDate(date.getDate() - diffToMonday);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  return { start, end };
+};
+
+const isWithinRange = (date, start, end) => date >= start && date <= end;
+
+const getTrackStartDate = (track) => {
+  if (!track.startDay) return null;
+  const rangeStart = new Date(config.startDate);
+  return new Date(rangeStart.getFullYear(), rangeStart.getMonth(), track.startDay);
+};
+
+const getTrackEndDate = (track) => {
+  if (!track.duration || !track.startDay) return null;
+  const start = getTrackStartDate(track);
+  if (!start) return null;
+  const end = new Date(start);
+  end.setDate(end.getDate() + track.duration);
+  return end;
+};
+
+const isDateActiveForTrack = (track, date) => {
+  const start = getTrackStartDate(track);
+  const end = getTrackEndDate(track);
+  if (start && date < start) return false;
+  if (end && date >= end) return false;
+  return true;
+};
 
 export default function WinterTracker() {
   // Data state
@@ -42,6 +104,8 @@ export default function WinterTracker() {
   const [editingMisc, setEditingMisc] = useState(null);
   const [miscTimeInput, setMiscTimeInput] = useState("");
   const [miscCommentInput, setMiscCommentInput] = useState("");
+  const [noteSearch, setNoteSearch] = useState("");
+  const [selectedTag, setSelectedTag] = useState(null);
 
   // Auth state
   const [isEditMode, setIsEditMode] = useState(false);
@@ -55,6 +119,8 @@ export default function WinterTracker() {
   const todayDay = today.getDate();
   const todayMonth = today.getMonth();
   const todayYear = today.getFullYear();
+  const todayDate = new Date(todayYear, todayMonth, todayDay);
+  const todayKey = formatDateKey(todayDate);
   const theme = config.theme;
 
   // Load data and check auth on mount
@@ -141,10 +207,10 @@ export default function WinterTracker() {
   };
 
   // Data handlers
-  const incrementHours = (trackId, day, maxHours) => {
+  const incrementHours = (trackId, dateKey, maxHours) => {
     if (!isEditMode) return;
 
-    const key = `${trackId}-${day}`;
+    const key = `${trackId}-${dateKey}`;
     const current = hours[key] || 0;
     const next =
       current >= maxHours
@@ -155,17 +221,17 @@ export default function WinterTracker() {
     saveData(newHours, notes, dailyHighlights, dailyMisc);
   };
 
-  const openNoteEditor = (trackId, day, e) => {
+  const openNoteEditor = (trackId, dateKey, date, e) => {
     if (!isEditMode) return;
     e.preventDefault();
-    const key = `${trackId}-${day}`;
-    setEditingCell({ trackId, day });
+    const key = `${trackId}-${dateKey}`;
+    setEditingCell({ trackId, dateKey, date });
     setNoteInput(notes[key] || "");
   };
 
   const saveNote = () => {
     if (editingCell) {
-      const key = `${editingCell.trackId}-${editingCell.day}`;
+      const key = `${editingCell.trackId}-${editingCell.dateKey}`;
       const newNotes = { ...notes, [key]: noteInput };
       setNotes(newNotes);
       saveData(hours, newNotes, dailyHighlights, dailyMisc);
@@ -179,17 +245,17 @@ export default function WinterTracker() {
     setNoteInput("");
   };
 
-  const openHighlightEditor = (day) => {
+  const openHighlightEditor = (dateKey, date) => {
     if (!isEditMode) return;
-    setEditingHighlight(day);
-    setHighlightInput(dailyHighlights[day] || "");
+    setEditingHighlight({ dateKey, date });
+    setHighlightInput(dailyHighlights[dateKey] || "");
   };
 
   const saveHighlight = () => {
     if (editingHighlight) {
       const newHighlights = {
         ...dailyHighlights,
-        [editingHighlight]: highlightInput,
+        [editingHighlight.dateKey]: highlightInput,
       };
       setDailyHighlights(newHighlights);
       saveData(hours, notes, newHighlights, dailyMisc);
@@ -203,16 +269,16 @@ export default function WinterTracker() {
     setHighlightInput("");
   };
 
-  const openMiscEditor = (day) => {
+  const openMiscEditor = (dateKey, date) => {
     if (!isEditMode) {
-      const miscData = dailyMisc[day];
+      const miscData = dailyMisc[dateKey];
       if (miscData && (miscData.time || miscData.comment)) {
-        setViewingMisc({ ...miscData, day });
+        setViewingMisc({ ...miscData, date });
       }
       return;
     }
-    setEditingMisc(day);
-    const miscData = dailyMisc[day] || { time: "", comment: "" };
+    setEditingMisc({ dateKey, date });
+    const miscData = dailyMisc[dateKey] || { time: "", comment: "" };
     setMiscTimeInput(miscData.time || "");
     setMiscCommentInput(miscData.comment || "");
   };
@@ -221,7 +287,7 @@ export default function WinterTracker() {
     if (editingMisc) {
       const newMisc = {
         ...dailyMisc,
-        [editingMisc]: {
+        [editingMisc.dateKey]: {
           time: miscTimeInput.trim(),
           comment: miscCommentInput.trim(),
         },
@@ -244,11 +310,10 @@ export default function WinterTracker() {
   const getTrackStats = (track) => {
     let totalTarget = 0,
       totalLogged = 0;
-    dates.forEach(({ day }) => {
-      if (track.startDay && day < track.startDay) return;
-      if (track.duration && day >= track.startDay + track.duration) return;
+    dates.forEach(({ date, dateKey }) => {
+      if (!isDateActiveForTrack(track, date)) return;
       totalTarget += track.hoursPerDay;
-      totalLogged += hours[`${track.id}-${day}`] || 0;
+      totalLogged += hours[`${track.id}-${dateKey}`] || 0;
     });
     return { totalTarget, totalLogged };
   };
@@ -267,25 +332,18 @@ export default function WinterTracker() {
   const getDailyStats = () => {
     let dailyTarget = 0,
       dailyLogged = 0;
-    const today = todayDay;
 
     config.tracks.forEach((track) => {
       if (track.hoursPerDay > 0) {
-        if (track.startDay && today < track.startDay) return;
-        if (
-          track.startDay &&
-          track.duration &&
-          today >= track.startDay + track.duration
-        )
-          return;
+        if (!isDateActiveForTrack(track, todayDate)) return;
         dailyTarget += track.hoursPerDay;
-        const key = `${track.id}-${today}`;
+        const key = `${track.id}-${todayKey}`;
         dailyLogged += hours[key] || 0;
       }
     });
 
     // Add misc time for today
-    const miscData = dailyMisc[today] || { time: "", comment: "" };
+    const miscData = dailyMisc[todayKey] || { time: "", comment: "" };
     if (miscData.time) {
       const miscTime = Number.parseFloat(miscData.time) || 0;
       dailyLogged += miscTime;
@@ -294,24 +352,165 @@ export default function WinterTracker() {
     return { totalTarget: dailyTarget, totalLogged: dailyLogged };
   };
 
+  const consistencyThreshold = 0.8;
+
+  const getDailyTotalsForDate = (date) => {
+    let target = 0;
+    let actual = 0;
+    const dateKey = formatDateKey(date);
+
+    config.tracks.forEach((track) => {
+      if (track.hoursPerDay > 0 && isDateActiveForTrack(track, date)) {
+        target += track.hoursPerDay;
+      }
+      const key = `${track.id}-${dateKey}`;
+      actual += hours[key] || 0;
+    });
+
+    const miscData = dailyMisc[dateKey] || { time: "", comment: "" };
+    if (miscData.time) {
+      const miscTime = Number.parseFloat(miscData.time) || 0;
+      actual += miscTime;
+    }
+
+    return { target, actual };
+  };
+
+  const getConsistencyStats = () => {
+    let totalDays = 0;
+    let metDays = 0;
+    let longestStreak = 0;
+    let tempStreak = 0;
+
+    dates.forEach(({ date }) => {
+      if (date > todayDate) return;
+      const { target, actual } = getDailyTotalsForDate(date);
+      if (target <= 0) return;
+      totalDays += 1;
+      const met = actual >= target * consistencyThreshold;
+      if (met) {
+        metDays += 1;
+        tempStreak += 1;
+        longestStreak = Math.max(longestStreak, tempStreak);
+      } else {
+        tempStreak = 0;
+      }
+    });
+
+    let currentStreak = 0;
+    for (let i = dates.length - 1; i >= 0; i -= 1) {
+      const date = dates[i].date;
+      if (date > todayDate) continue;
+      const { target, actual } = getDailyTotalsForDate(date);
+      if (target <= 0) continue;
+      if (actual >= target * consistencyThreshold) {
+        currentStreak += 1;
+      } else {
+        break;
+      }
+    }
+
+    const consistencyScore =
+      totalDays > 0 ? Math.round((metDays / totalDays) * 100) : 0;
+
+    return { totalDays, metDays, consistencyScore, currentStreak, longestStreak };
+  };
+
+  const getWeeklyTargetForRange = (track, range) => {
+    if (typeof track.weeklyTarget === "number") return track.weeklyTarget;
+    let activeDays = 0;
+    dates.forEach(({ date }) => {
+      if (!isWithinRange(date, range.start, range.end)) return;
+      if (track.hoursPerDay > 0 && isDateActiveForTrack(track, date)) {
+        activeDays += 1;
+      }
+    });
+    return track.hoursPerDay * activeDays;
+  };
+
+  const getTrackWeeklyStats = (track, range) => {
+    let actual = 0;
+    dates.forEach(({ date, dateKey }) => {
+      if (!isWithinRange(date, range.start, range.end)) return;
+      if (track.hoursPerDay > 0 && !isDateActiveForTrack(track, date)) return;
+      const key = `${track.id}-${dateKey}`;
+      actual += hours[key] || 0;
+    });
+    const target = getWeeklyTargetForRange(track, range);
+    return { target, actual, met: target > 0 && actual >= target };
+  };
+
+  const getWeeklySummary = (range) => {
+    let totalTarget = 0;
+    let totalActual = 0;
+    let topTrack = null;
+    let topTrackHours = 0;
+
+    config.tracks.forEach((track) => {
+      if (track.hoursPerDay <= 0) return;
+      const { target, actual } = getTrackWeeklyStats(track, range);
+      totalTarget += target;
+      totalActual += actual;
+      if (actual > topTrackHours) {
+        topTrackHours = actual;
+        topTrack = track;
+      }
+    });
+
+    return { totalTarget, totalActual, topTrack, topTrackHours };
+  };
+
+  const resetNextWeek = () => {
+    if (!isEditMode) return;
+    const confirmed = window.confirm(
+      "Reset next week's data? This will clear hours, notes, highlights, and misc."
+    );
+    if (!confirmed) return;
+
+    const currentWeek = getWeekRange(todayDate);
+    const nextWeekStart = new Date(currentWeek.start);
+    nextWeekStart.setDate(currentWeek.start.getDate() + 7);
+    const nextWeekEnd = new Date(nextWeekStart);
+    nextWeekEnd.setDate(nextWeekStart.getDate() + 6);
+
+    const resetDateKeys = new Set(
+      dates
+        .filter(({ date }) => isWithinRange(date, nextWeekStart, nextWeekEnd))
+        .map(({ dateKey }) => dateKey)
+    );
+
+    const stripByDateKeys = (obj) =>
+      Object.fromEntries(
+        Object.entries(obj).filter(([key]) => {
+          const dateKey = key.length >= 10 ? key.slice(-10) : key;
+          return !resetDateKeys.has(dateKey);
+        })
+      );
+
+    const newHours = stripByDateKeys(hours);
+    const newNotes = stripByDateKeys(notes);
+    const newHighlights = stripByDateKeys(dailyHighlights);
+    const newMisc = stripByDateKeys(dailyMisc);
+
+    setHours(newHours);
+    setNotes(newNotes);
+    setDailyHighlights(newHighlights);
+    setDailyMisc(newMisc);
+    saveData(newHours, newNotes, newHighlights, newMisc);
+  };
+
   // Calculate cumulative hours for graph
   const getCumulativeHours = () => {
     const data = [];
     let cumulativeIdeal = 0;
     let cumulativeActual = 0;
 
-    dates.forEach(({ day }) => {
+    dates.forEach(({ day, date, dateKey }) => {
       // Calculate ideal hours for this day
       let dayIdeal = 0;
       config.tracks.forEach((track) => {
         if (track.hoursPerDay > 0) {
-          if (track.startDay && day < track.startDay) return;
-          if (
-            track.startDay &&
-            track.duration &&
-            day >= track.startDay + track.duration
-          )
-            return;
+          if (!isDateActiveForTrack(track, date)) return;
           dayIdeal += track.hoursPerDay;
         }
       });
@@ -319,12 +518,12 @@ export default function WinterTracker() {
       // Calculate actual hours for this day
       let dayActual = 0;
       config.tracks.forEach((track) => {
-        const key = `${track.id}-${day}`;
+        const key = `${track.id}-${dateKey}`;
         dayActual += hours[key] || 0;
       });
 
       // Add misc time to actual hours (for productive hours tracking)
-      const miscData = dailyMisc[day] || { time: "", comment: "" };
+      const miscData = dailyMisc[dateKey] || { time: "", comment: "" };
       if (miscData.time) {
         const miscTime = Number.parseFloat(miscData.time) || 0;
         dayActual += miscTime;
@@ -335,6 +534,8 @@ export default function WinterTracker() {
 
       data.push({
         day,
+        date,
+        dateKey,
         ideal: cumulativeIdeal,
         actual: cumulativeActual,
         ideal80: cumulativeIdeal * 0.8,
@@ -348,7 +549,7 @@ export default function WinterTracker() {
   const maxHours = 290; // Fixed y-axis range
 
   // Find today's index in graphData
-  const todayIndex = graphData.findIndex((d) => d.day === todayDay);
+  const todayIndex = graphData.findIndex((d) => d.dateKey === todayKey);
   const todayData = todayIndex >= 0 ? graphData[todayIndex] : null;
 
   // Calculate lost hours only up to today
@@ -368,6 +569,51 @@ export default function WinterTracker() {
   const totalPercentage = Math.round(
     (displayStats.totalLogged / displayStats.totalTarget || 0) * 100
   );
+
+  const consistencyStats = getConsistencyStats();
+  const weekRange = getWeekRange(todayDate);
+  const weeklySummary = getWeeklySummary(weekRange);
+
+  const notesIndex = useMemo(() => {
+    const items = [];
+    Object.entries(notes).forEach(([key, text]) => {
+      if (!text) return;
+      const dateKey = key.slice(-10);
+      const trackId = key.slice(0, -11);
+      const track = config.tracks.find((t) => t.id === trackId);
+      const dateItem = dates.find((d) => d.dateKey === dateKey);
+      items.push({
+        key,
+        text,
+        dateKey,
+        date: dateItem?.date,
+        trackName: track?.name || trackId,
+        tags: extractTags(text),
+      });
+    });
+    return items.sort((a, b) => {
+      if (!a.date || !b.date) return 0;
+      return b.date - a.date;
+    });
+  }, [notes]);
+
+  const allTags = useMemo(() => {
+    const tags = new Set();
+    notesIndex.forEach((item) => item.tags.forEach((tag) => tags.add(tag)));
+    return Array.from(tags).sort();
+  }, [notesIndex]);
+
+  const filteredNotes = useMemo(() => {
+    const search = noteSearch.trim().toLowerCase();
+    return notesIndex.filter((item) => {
+      const matchesSearch =
+        !search ||
+        item.text.toLowerCase().includes(search) ||
+        item.trackName.toLowerCase().includes(search);
+      const matchesTag = !selectedTag || item.tags.includes(selectedTag);
+      return matchesSearch && matchesTag;
+    });
+  }, [notesIndex, noteSearch, selectedTag]);
 
   // Helper to parse notes with clickable links
   const parseNote = (text) => {
@@ -391,7 +637,7 @@ export default function WinterTracker() {
   };
 
   // Helper component for cells with notes - shows indicator, click to view
-  const CellWithNote = ({ note, trackName, day, children }) => {
+  const CellWithNote = ({ note, trackName, dateLabel, children }) => {
     if (!note) return children;
 
     return (
@@ -399,7 +645,7 @@ export default function WinterTracker() {
         style={{ position: "relative", cursor: "pointer" }}
         onClick={(e) => {
           e.stopPropagation();
-          setViewingNote({ note, trackName, day });
+          setViewingNote({ note, trackName, dateLabel });
         }}
       >
         {children}
@@ -734,9 +980,10 @@ export default function WinterTracker() {
                   >
                     Track
                   </th>
-                  {dates.map(({ day, dayName, isWeekend, month, year }) => (
+                  {dates.map(
+                    ({ day, dayName, isWeekend, month, year, dateKey }) => (
                     <th
-                      key={day}
+                      key={dateKey}
                       style={{
                         padding: "14px 6px",
                         fontSize: 9,
@@ -771,7 +1018,8 @@ export default function WinterTracker() {
                         {day}
                       </div>
                     </th>
-                  ))}
+                  )
+                  )}
                   <th
                     style={{
                       textAlign: "right",
@@ -795,6 +1043,7 @@ export default function WinterTracker() {
                     stats.totalTarget > 0
                       ? stats.totalLogged / stats.totalTarget
                       : 0;
+                  const weeklyStats = getTrackWeeklyStats(track, weekRange);
 
                   return (
                     <tr
@@ -857,6 +1106,20 @@ export default function WinterTracker() {
                                   {track.hoursPerDay}h/day
                                 </span>
                               )}
+                              {weeklyStats.met && (
+                                <span
+                                  style={{
+                                    fontSize: 9,
+                                    color: "#0f172a",
+                                    background: "#facc15",
+                                    padding: "2px 7px",
+                                    borderRadius: 99,
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  Weekly Milestone
+                                </span>
+                              )}
                               {track.resources.length > 0 && (
                                 <button
                                   onClick={() =>
@@ -914,39 +1177,38 @@ export default function WinterTracker() {
                           </div>
                         </div>
                       </td>
-                      {dates.map(({ day }) => {
-                        const key = `${track.id}-${day}`;
+                      {dates.map(({ day, dateKey, date }) => {
+                        const key = `${track.id}-${dateKey}`;
                         const logged = hours[key] || 0;
                         const cellNote = notes[key] || "";
                         const active =
                           track.hoursPerDay > 0 &&
-                          (!track.startDay ||
-                            (day >= track.startDay &&
-                              (!track.duration ||
-                                day < track.startDay + track.duration)));
+                          isDateActiveForTrack(track, date);
+                        const dateLabel = formatDateLabel(date);
                         const totalPixels = track.hoursPerDay;
                         const filledPixels = Math.floor(logged);
                         const halfFilled = logged % 1 >= 0.5;
                         const hasAnyProgress = logged > 0;
 
                         return (
-                          <td key={day} style={{ padding: "5px 3px" }}>
+                          <td key={dateKey} style={{ padding: "5px 3px" }}>
                             <CellWithNote
                               note={cellNote}
                               trackName={track.name}
-                              day={day}
+                              dateLabel={dateLabel}
                             >
                               <button
                                 onClick={() =>
                                   active &&
                                   incrementHours(
                                     track.id,
-                                    day,
+                                    dateKey,
                                     track.hoursPerDay
                                   )
                                 }
                                 onContextMenu={(e) =>
-                                  active && openNoteEditor(track.id, day, e)
+                                  active &&
+                                  openNoteEditor(track.id, dateKey, date, e)
                                 }
                                 disabled={!active}
                                 style={{
@@ -1113,19 +1375,19 @@ export default function WinterTracker() {
                       </div>
                     </div>
                   </td>
-                  {dates.map(({ day }) => {
-                    const highlight = dailyHighlights[day] || "";
+                {dates.map(({ day, dateKey, date }) => {
+                    const highlight = dailyHighlights[dateKey] || "";
                     const hasHighlight = highlight.length > 0;
 
                     return (
-                      <td key={day} style={{ padding: "5px 3px" }}>
+                      <td key={dateKey} style={{ padding: "5px 3px" }}>
                         <CellWithNote
                           note={highlight}
                           trackName="Today's Highlight"
-                          day={day}
+                          dateLabel={formatDateLabel(date)}
                         >
                           <button
-                            onClick={() => openHighlightEditor(day)}
+                            onClick={() => openHighlightEditor(dateKey, date)}
                             style={{
                               minWidth: 38,
                               height: 30,
@@ -1204,17 +1466,17 @@ export default function WinterTracker() {
                       </div>
                     </div>
                   </td>
-                  {dates.map(({ day }) => {
-                    const miscData = dailyMisc[day] || {
+                  {dates.map(({ day, dateKey, date }) => {
+                    const miscData = dailyMisc[dateKey] || {
                       time: "",
                       comment: "",
                     };
                     const hasMisc = miscData.time || miscData.comment;
 
                     return (
-                      <td key={day} style={{ padding: "5px 3px" }}>
+                      <td key={dateKey} style={{ padding: "5px 3px" }}>
                         <button
-                          onClick={() => openMiscEditor(day)}
+                          onClick={() => openMiscEditor(dateKey, date)}
                           style={{
                             minWidth: 38,
                             height: 30,
@@ -1326,6 +1588,254 @@ export default function WinterTracker() {
               })}
           </div>
         )}
+
+        {/* Weekly Review + Streaks */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: 12,
+            marginTop: 16,
+            opacity: mounted ? 1 : 0,
+            transition: "all 0.7s cubic-bezier(0.16,1,0.3,1) 0.22s",
+          }}
+        >
+          <div
+            style={{
+              background: theme.backgroundSecondary,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 14,
+              padding: 16,
+            }}
+          >
+            <div style={{ fontSize: 10, color: theme.textMuted }}>
+              Current Streak
+            </div>
+            <div
+              style={{
+                fontFamily: "Georgia, serif",
+                fontSize: 28,
+                color: theme.textPrimary,
+                marginTop: 6,
+              }}
+            >
+              {consistencyStats.currentStreak} days
+            </div>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 4 }}>
+              Longest: {consistencyStats.longestStreak} days
+            </div>
+          </div>
+
+          <div
+            style={{
+              background: theme.backgroundSecondary,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 14,
+              padding: 16,
+            }}
+          >
+            <div style={{ fontSize: 10, color: theme.textMuted }}>
+              Consistency Score
+            </div>
+            <div
+              style={{
+                fontFamily: "Georgia, serif",
+                fontSize: 28,
+                color: theme.textPrimary,
+                marginTop: 6,
+              }}
+            >
+              {consistencyStats.consistencyScore}%
+            </div>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 4 }}>
+              {consistencyStats.metDays}/{consistencyStats.totalDays} days ≥{" "}
+              {Math.round(consistencyThreshold * 100)}%
+            </div>
+          </div>
+
+          <div
+            style={{
+              background: theme.backgroundSecondary,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 14,
+              padding: 16,
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+            }}
+          >
+            <div style={{ fontSize: 10, color: theme.textMuted }}>
+              Weekly Review
+            </div>
+            <div style={{ fontSize: 12, color: theme.textSecondary }}>
+              {formatDateLabel(weekRange.start)} – {formatDateLabel(weekRange.end)}
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>
+              {weeklySummary.totalActual}h / {weeklySummary.totalTarget}h
+            </div>
+            <div style={{ fontSize: 11, color: theme.textMuted }}>
+              Top track:{" "}
+              {weeklySummary.topTrack
+                ? `${weeklySummary.topTrack.name} (${weeklySummary.topTrackHours}h)`
+                : "—"}
+            </div>
+            <button
+              onClick={resetNextWeek}
+              disabled={!isEditMode}
+              style={{
+                marginTop: 6,
+                alignSelf: "flex-start",
+                padding: "6px 10px",
+                fontSize: 10,
+                borderRadius: 6,
+                border: `1px solid ${theme.border}`,
+                background: theme.backgroundTertiary,
+                color: theme.textSecondary,
+                cursor: isEditMode ? "pointer" : "not-allowed",
+                opacity: isEditMode ? 1 : 0.6,
+              }}
+            >
+              Reset Next Week
+            </button>
+          </div>
+        </div>
+
+        {/* Notes Explorer */}
+        <div
+          style={{
+            background: theme.backgroundSecondary,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 16,
+            padding: 20,
+            marginTop: 20,
+            opacity: mounted ? 1 : 0,
+            transition: "all 0.7s cubic-bezier(0.16,1,0.3,1) 0.24s",
+          }}
+        >
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>Notes Explorer</div>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 4 }}>
+              Search across notes and filter by hashtags (e.g. #paper, #coding)
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <input
+              value={noteSearch}
+              onChange={(e) => setNoteSearch(e.target.value)}
+              placeholder="Search notes or track names..."
+              style={{
+                flex: "1 1 240px",
+                minWidth: 200,
+                background: theme.backgroundTertiary,
+                border: `1px solid ${theme.border}`,
+                borderRadius: 8,
+                padding: "8px 10px",
+                color: theme.textPrimary,
+                fontSize: 12,
+              }}
+            />
+            <button
+              onClick={() => setSelectedTag(null)}
+              style={{
+                padding: "6px 10px",
+                fontSize: 11,
+                borderRadius: 999,
+                border: `1px solid ${theme.border}`,
+                background: !selectedTag ? theme.accent : theme.backgroundTertiary,
+                color: !selectedTag ? "#000" : theme.textSecondary,
+                cursor: "pointer",
+              }}
+            >
+              All Tags
+            </button>
+            {allTags.map((tag) => (
+              <button
+                key={tag}
+                onClick={() =>
+                  setSelectedTag(selectedTag === tag ? null : tag)
+                }
+                style={{
+                  padding: "6px 10px",
+                  fontSize: 11,
+                  borderRadius: 999,
+                  border: `1px solid ${theme.border}`,
+                  background:
+                    selectedTag === tag ? theme.accent : theme.backgroundTertiary,
+                  color: selectedTag === tag ? "#000" : theme.textSecondary,
+                  cursor: "pointer",
+                }}
+              >
+                #{tag}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            {filteredNotes.length === 0 ? (
+              <div style={{ fontSize: 12, color: theme.textMuted }}>
+                No notes match your filters yet.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 10 }}>
+                {filteredNotes.map((item) => (
+                  <div
+                    key={item.key}
+                    style={{
+                      background: theme.backgroundTertiary,
+                      border: `1px solid ${theme.border}`,
+                      borderRadius: 10,
+                      padding: 12,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 8,
+                        flexWrap: "wrap",
+                        fontSize: 11,
+                        color: theme.textMuted,
+                      }}
+                    >
+                      <span>{item.trackName}</span>
+                      <span>
+                        {item.date ? formatDateLabel(item.date) : item.dateKey}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                      {parseNote(item.text)}
+                    </div>
+                    {item.tags.length > 0 && (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {item.tags.map((tag) => (
+                          <button
+                            key={tag}
+                            onClick={() => setSelectedTag(tag)}
+                            style={{
+                              padding: "3px 8px",
+                              fontSize: 10,
+                              borderRadius: 999,
+                              border: `1px solid ${theme.border}`,
+                              background: theme.backgroundSecondary,
+                              color: theme.textSecondary,
+                              cursor: "pointer",
+                            }}
+                          >
+                            #{tag}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* Progress Graph */}
         <div
@@ -1976,7 +2486,7 @@ export default function WinterTracker() {
                       config.tracks.find((t) => t.id === editingCell.trackId)
                         ?.name
                     }{" "}
-                    · Day {editingCell.day}
+                    · {formatDateLabel(editingCell.date)}
                   </div>
                 </div>
                 <button
@@ -2106,7 +2616,7 @@ export default function WinterTracker() {
                       marginTop: 2,
                     }}
                   >
-                    January {editingHighlight}, 2026
+                    {formatDateLabel(editingHighlight.date)}
                   </div>
                 </div>
                 <button
@@ -2237,7 +2747,7 @@ export default function WinterTracker() {
                       marginTop: 2,
                     }}
                   >
-                    January {editingMisc}, 2026
+                    {formatDateLabel(editingMisc.date)}
                   </div>
                 </div>
                 <button
@@ -2399,7 +2909,7 @@ export default function WinterTracker() {
                       marginTop: 2,
                     }}
                   >
-                    {viewingNote.trackName} · Day {viewingNote.day}
+                    {viewingNote.trackName} · {viewingNote.dateLabel}
                   </div>
                 </div>
                 <button
@@ -2487,7 +2997,7 @@ export default function WinterTracker() {
                       marginTop: 2,
                     }}
                   >
-                    Day {viewingMisc.day}
+                    {formatDateLabel(viewingMisc.date)}
                   </div>
                 </div>
                 <button
