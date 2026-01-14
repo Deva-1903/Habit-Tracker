@@ -1,0 +1,17 @@
+import { Analytics } from "@vercel/analytics/next";
+
+export const metadata = {
+  title: "what deva's upto",
+  description: "tracking my winter deep work season — jan 2026",
+};
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="en">
+      <body style={{ margin: 0 }}>
+        {children}
+        <Analytics />
+      </body>
+    </html>
+  );
+}
