@@ -12,7 +12,7 @@ I wanted a simple way to stay accountable during my winter deep work season. Not
 
    ```bash
    git clone
-   cd winter-tracker
+   cd habit-tracker
    npm install
    ```
 
